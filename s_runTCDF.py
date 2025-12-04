@@ -198,7 +198,7 @@ def runTCDF(datafile):
     columns = list(df_data)
     for c in columns:
         idx = df_data.columns.get_loc(c)
-        causes, causeswithdelay, realloss, scores = TCDF.findcauses(c, cuda=cuda, epochs=nrepochs, 
+        causes, causeswithdelay, realloss, scores = s_TCDF.findcauses(c, cuda=cuda, epochs=nrepochs, 
         kernel_size=kernel_size, layers=levels, log_interval=loginterval, 
         lr=learningrate, optimizername=optimizername,
         seed=seed, dilation_c=dilation_c, significance=significance, file=datafile)
