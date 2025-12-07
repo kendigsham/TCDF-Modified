@@ -194,6 +194,7 @@ def main():
     p = argparse.ArgumentParser(description="Grid search wrapper for TCDF (run multiple combos in one pod).")
     p.add_argument("--datafile", required=True, help="Path to CSV dataset (columns = variables).")
     p.add_argument("--kernels", type=int, nargs="+", required=True, help="kernel_size values to try (dilation will be set equal).")
+    p.add_argument("--dilations", type=int, nargs="+", default=None, help="dilation coefficients to try. If omitted, dilation==kernel for each kernel.")
     p.add_argument("--hidden_layers", type=int, nargs="+", required=True, help="hidden_layers values to try (levels = hidden_layers+1).")
     p.add_argument("--desired_lag", type=int, default=None, help="Optional: skip combos whose receptive field < desired_lag.")
     p.add_argument("--epochs", type=int, default=200, help="Epochs to run each TCDF instance (use small for quick grid).")
@@ -252,94 +253,88 @@ def main():
     combos_summary = {}
 
     for k in args.kernels:
-        for hl in args.hidden_layers:
-            dilation = k  # enforce kernel == dilation
-            rf = receptive_field(kernel_size=k, dilation_c=dilation, hidden_layers=hl)
-            combo_name = f"k{k}_hl{hl}_rf{rf}"
-            combo_out = {
-                "kernel_size": k,
-                "dilation": dilation,
-                "hidden_layers": hl,
-                "receptive_field": rf,
-                "skipped": False,
-                "start_time": None,
-                "end_time": None,
-                "results_file": None,
-                "error": None
-            }
-
-            # optionally skip combos that cannot cover desired lag
-            if args.desired_lag is not None and rf < args.desired_lag:
-                print(f"Skipping combo {combo_name}: receptive field {rf} < desired_lag {args.desired_lag}")
-                combo_out["skipped"] = True
-                combos_summary[combo_name] = combo_out
-                continue
-
-            print(f"\n=== Running combo: {combo_name} ===")
-            params = {
-                "cuda": use_cuda,
-                "epochs": args.epochs,
-                "kernel_size": k,
-                "hidden_layers": hl,
-                "learning_rate": args.learning_rate,
-                "optimizer": args.optimizer,
-                "log_interval": args.log_interval,
-                "seed": args.seed,
-                "dilation_coefficient": dilation,
-                "significance": args.significance,
-            }
-
-            combo_out["start_time"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
-
-            try:
-                allcauses, alldelays, allreallosses, allscores, columns = run_tcdf_file(args.datafile, params)
-                graph_matrix, val_matrix = tcdf_helper.make_matrices(alldelays, columns, allscores)
-                print(f"Discovered graph matrix shape: {graph_matrix.shape}")
-
-                combo_out['causal_graph_shape'] = f'vars:{graph_matrix.shape[0]},lags:{graph_matrix.shape[2]}'
-                # Build a lightweight result dict to persist
-                discovered = []
-                for key, delay in alldelays.items():
-                    # key is (effect_idx, cause_idx)
-                    discovered.append({"effect_idx": int(key[0]), "cause_idx": int(key[1]), "delay": int(delay)})
-
-                # Convert numpy types to native Python for JSON serialization
-                serializable = {
-                    "params": params,
-                    "columns": columns,
-                    "validated_causes_counts": {str(k): len(v) for k, v in allcauses.items()},
-                    "discovered_delays": discovered,
-                    "losses": {str(k): (None if v is None else float(v)) for k, v in allreallosses.items()},
-                    "scores_shapes": {str(k): (0 if v is None else len(v)) for k, v in allscores.items()},
+        dilation_list = args.dilations if args.dilations is not None else [k]
+        for dilation in dilation_list:
+            for hl in args.hidden_layers:
+                # DO NOT overwrite `dilation` here (previous bug)
+                rf = receptive_field(kernel_size=k, dilation_c=dilation, hidden_layers=hl)
+                combo_name = f"k{k}_d{dilation}_hl{hl}_rf{rf}"
+                combo_out = {
+                    "kernel_size": k,
+                    "dilation": dilation,
+                    "hidden_layers": hl,
+                    "receptive_field": rf,
+                    "skipped": False,
+                    "start_time": None,
+                    "end_time": None,
+                    "results_file": None,
+                    "error": None
                 }
 
-                # timestamp = int(time.time())
-                # outpath = outdir / f"tcdf_grid_{combo_name}_{timestamp}.json"
-                outpath = outdir / f"tcdf_grid_{combo_name}.json"
-                with open(outpath, "w") as fh:
-                    json.dump(serializable, fh, indent=2)
+                # optionally skip combos that cannot cover desired lag
+                if args.desired_lag is not None and rf < args.desired_lag:
+                    print(f"Skipping combo {combo_name}: receptive field {rf} < desired_lag {args.desired_lag}")
+                    combo_out["skipped"] = True
+                    combos_summary[combo_name] = combo_out
+                    continue
 
-                combo_out["end_time"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
-                combo_out["results_file"] = str(outpath)
+                print(f"\n=== Running combo: {combo_name} ===")
+                params = {
+                    "cuda": use_cuda,
+                    "epochs": args.epochs,
+                    "kernel_size": k,
+                    "hidden_layers": hl,
+                    "learning_rate": args.learning_rate,
+                    "optimizer": args.optimizer,
+                    "log_interval": args.log_interval,
+                    "seed": args.seed,
+                    "dilation_coefficient": dilation,
+                    "significance": args.significance,
+                }
 
-                # quick check if desired lag was found anywhere
-                if args.desired_lag is not None:
-                    combo_out["found_desired_lag"] = any(int(d["delay"]) == args.desired_lag for d in discovered)
-                else:
-                    combo_out["found_desired_lag"] = None
+                combo_out["start_time"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
 
-                print(f"Combo finished — results saved to {outpath}")
+                try:
+                    allcauses, alldelays, allreallosses, allscores, columns = run_tcdf_file(args.datafile, params)
+                    graph_matrix, val_matrix = tcdf_helper.make_matrices(alldelays, columns, allscores)
+                    print(f"Discovered graph matrix shape: {graph_matrix.shape}")
 
-            except Exception as e:
-                combo_out["end_time"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
-                combo_out["error"] = str(e)
-                print(f"Error while running combo {combo_name}: {e}")
+                    combo_out['causal_graph_shape'] = f'vars:{graph_matrix.shape[0]},lags:{graph_matrix.shape[2]}'
+                    discovered = []
+                    for key, delay in alldelays.items():
+                        discovered.append({"effect_idx": int(key[0]), "cause_idx": int(key[1]), "delay": int(delay)})
 
-            combos_summary[combo_name] = combo_out
+                    serializable = {
+                        "params": params,
+                        "columns": columns,
+                        "validated_causes_counts": {str(k): len(v) for k, v in allcauses.items()},
+                        "discovered_delays": discovered,
+                        "losses": {str(k): (None if v is None else float(v)) for k, v in allreallosses.items()},
+                        "scores_shapes": {str(k): (0 if v is None else len(v)) for k, v in allscores.items()},
+                    }
 
-            # small pause to avoid hammering I/O at job start
-            time.sleep(1.0)
+                    outpath = outdir / f"tcdf_grid_{combo_name}.json"
+                    with open(outpath, "w") as fh:
+                        json.dump(serializable, fh, indent=2)
 
+                    combo_out["end_time"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+                    combo_out["results_file"] = str(outpath)
+
+                    if args.desired_lag is not None:
+                        combo_out["found_desired_lag"] = any(int(d["delay"]) == args.desired_lag for d in discovered)
+                    else:
+                        combo_out["found_desired_lag"] = None
+
+                    print(f"Combo finished — results saved to {outpath}")
+
+                except Exception as e:
+                    combo_out["end_time"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+                    combo_out["error"] = str(e)
+                    print(f"Error while running combo {combo_name}: {e}")
+
+                combos_summary[combo_name] = combo_out
+                time.sleep(1.0)
+                
     # Write summary of combos
     # summary_path = outdir / f"tcdf_grid_summary_{int(time.time())}.json"
     summary_path = outdir / f"tcdf_grid_summary_{outdir.name}.json"
