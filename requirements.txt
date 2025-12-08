@@ -3,5 +3,4 @@ numpy
 pandas
 matplotlib
 networkx
-torch
-tqdm
+tqdm 
